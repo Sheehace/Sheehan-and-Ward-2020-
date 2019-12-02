@@ -1,0 +1,705 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Jan 27 20:50:55 2018
+
+@author: Chris
+"""
+
+#%% 
+# Code Block 1
+# Import the parts of Python and Landlab that are needed to run this code.
+
+import numpy as np
+from landlab import RasterModelGrid, HexModelGrid
+from landlab.components import StreamPowerEroder, FlowRouter, \
+     LinearDiffuser, DepressionFinderAndRouter, TaylorNonLinearDiffuser, PerronNLDiffuse
+from landlab import imshow_grid
+from matplotlib import pyplot as plt
+from landlab.plot import channel_profile as prf
+from landlab.components import ChiFinder, SteepnessFinder
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
+from matplotlib.ticker import LinearLocator, FormatStrFormatter
+from landlab import RasterModelGrid, CLOSED_BOUNDARY, FIXED_GRADIENT_BOUNDARY, \
+FIXED_VALUE_BOUNDARY
+from PIL import Image
+from landlab.plot.drainage_plot import drainage_plot
+from landlab.testing.tools import cdtemp
+from landlab.io.esri_ascii import write_esri_ascii
+import os
+import numpy as np
+import xarray as xr
+import dask
+from landlab.components import LithoLayers
+import decimal
+import math
+
+
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 2
+# Grid Parameters
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+number_of_rows = 625            # number of raster cells in vertical direction (y) (original value = 50)
+number_of_columns = 625        # number of raster cells in horizontal direction (x) (original value = 100)
+dxy = 8                        # side length of a raster model cell, or resolution [m] (original value = 200) 
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+mg = RasterModelGrid((number_of_rows, number_of_columns), dxy)
+
+# Create random noise
+np.random.seed(0)                                       # seed set to zero so our figures are reproducible
+mg_noise = np.random.rand(mg.number_of_nodes)/1000.     # intial noise on elevation grid
+
+# set up the elevation on the grid
+zr = mg.add_zeros('node', 'topographic__elevation')
+zr += mg_noise
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 3
+# Boundary Conditions
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+East = 1
+North = 1
+West = 1
+South = 1
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+mg.set_status_at_node_on_edges(right=East, top=North, left=West, bottom=South)
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 4
+# Initial Elevation Options
+
+##IEO Add-on: 3 N-S blocks with varying elevations######################################
+Strike_Valley = False                                                            ########
+########################################################################################
+                                                                                ########
+West_Edge = 400         # meters, not grid cells                                ########
+East_Edge = 1600        # meters, not grid cells                                ########
+Block_Relief = 5        # meters                                                ########
+                                                                                ########
+########################################################################################
+if Strike_Valley == True:                                                        ########
+    zr[np.where(mg.node_x<=West_Edge)] += Block_Relief                          ########
+    zr[np.where(mg.node_x>East_Edge)] += Block_Relief                           ########                                                                               ########
+##IOE Add-on: 3 N-S blocks with varying elevations######################################
+
+
+
+
+
+##IOE Add-on: MTE Bench ################################################################
+MTE_Bench = False                                                               ########
+########################################################################################
+                                                                                ########
+bench_slope = 1        # degrees, slope down to the west                       ########
+strike_slope = 0       # degrees, slope down to the west                       ########
+                                                                                ########
+########################################################################################          
+if MTE_Bench ==True:                                                            ########
+    bench_slope_rad = bench_slope * 0.0174533   # convert degrees to radians    ########
+    step1 = dxy * tan(bench_slope_rad)                                             ########
+    for Q in range(number_of_columns):                                             ########
+        Qi = Q * dxy                                                               ########
+        zr[np.where(mg.node_x==Qi)] = zr[np.where(mg.node_x==Qi)] + (step1 * Q)    ########
+    strike_slope_rad = strike_slope * 0.0174533    # convert degrees to radians    ########
+    step2 = dxy * tan(strike_slope_rad)                                            ########
+    for Z in range(number_of_rows):                                                ########
+        Zi = Z * dxy                                                               ########
+        zr[np.where(mg.node_y==Zi)] = zr[np.where(mg.node_y==Zi)] + (step2 * Z)    ########                                                                                ########
+##IOE Add-on: MTE Bench ################################################################
+
+
+
+
+
+
+
+
+
+
+#%% 
+# Code Block 5
+# LithoLayers
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+# Layer Organization
+dip = 25 # degrees     75.9638
+thickness = 100 # meters
+base_thickness = 100000  # meters
+number_above_ground = 0    # number of lithologic units above reference point 
+number_below_ground = 6    # # number of lithologic units below reference point 
+hard_layer_interval = 4     # one out of every # layers is a hard layer. top layer is always soft
+
+# Ksp designations 
+attrs = {'K_sp': {0: 5E-3,
+                  1: 5E-2,
+                  2: 1},
+         'K_hs': {0: 5E-1,
+                  1: 5E-1,
+                  2: 1},
+         'S_cr': {0: 1.0472,
+                  1: 0.558505,
+                  2: 0.558505}}           
+
+# Stream power equation
+m_sp = 0.5                  # exponent on drainage area in stream power equation 
+n_sp = 1                    # exponent on slope in stream power equation 
+
+# Hillslope Diffusion
+#K_hs = 0.01
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+dip_rad = dip * 0.0174533
+multiplier = math.tan(dip_rad)
+func = lambda x, y : multiplier*x + ((0*x)+(0*y)) 
+
+counter = 1
+set = np.arange(0, number_above_ground+number_below_ground+1, 1)
+layer_ids = set*0
+for i in set:
+    if i == 0:
+        layer_ids[i] = 1
+    if i == 1:
+        layer_ids[i] = 0
+    if i > 1:
+        if counter < (hard_layer_interval+1):
+            layer_ids[i] = 1
+            counter += 1
+        if counter == (hard_layer_interval+1):
+            layer_ids[i] = 0
+            counter = 1
+
+stack_ids = np.arange((number_above_ground*-1), (number_below_ground+1), 1)
+lmbda = 90 - dip
+lmbda_rad = lmbda * 0.0174533
+lmbda_rad_input = math.sin(lmbda_rad)
+
+layer_elevations = stack_ids * ((thickness) / lmbda_rad_input)
+layer_elevations[-1] = layer_elevations[-2] + base_thickness
+
+lith = LithoLayers(mg, layer_elevations, layer_ids, function=func, attrs=attrs) # Tilted Rocks
+
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 6 
+# Tectonic parameters
+
+###########################################################################################################################################################################################################
+###########################################################################################################################################################################################################
+
+
+
+
+
+##Backround Uplift Rate########################################################
+###############################################################################
+
+U = 1E-2
+
+###############################################################################
+##Backroud Uplift Rate#########################################################
+
+
+
+
+
+##Add-on: Periodic Uplift Pulser********************************************************
+Periodic_Uplift_Pulser = False                                               ########
+########################################################################################
+                                                                                ########
+U2 = 1E-2               # Periodic uplift rate (m/yr)                          ########
+Period = 5E4            # Full period of alternating cycle (yr)                ########
+U2_duration = 500       # Duration of U2 within alternating cycle (yr)         ########
+                                                                                ########
+##Add-on: Periodic Uplift Pulser########################################################
+
+
+
+
+
+##Differential N/S Stream Incision######################################################
+Diff_NS_Stream_Inciser = False                                                 ########
+########################################################################################
+                                                                                ########
+MultipleSlower = 10                                                             ########
+                                                                                ########
+##Differential N/S Stream Incision######################################################
+
+
+
+
+
+##Add-on: Uplift Gradient###############################################################
+Uplift_Gradient = False                                                         ########
+########################################################################################
+                                                                                ########
+low_uplift_rate = 1E-3                                                          ########                       
+high_uplift_rate = 5E-3                                                         ########
+                                                                                ########    
+########################################################################################
+
+
+
+
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+uplift_rate = np.ones(mg.number_of_nodes)*U #  uplift_rate [m/yr] 
+if Uplift_Gradient == True:
+    uplift_rate_gradient = (high_uplift_rate - low_uplift_rate)/(number_of_rows-3)
+    uplift_rate = low_uplift_rate + ((mg.node_y / dxy)-1) * uplift_rate_gradient
+
+
+
+
+
+
+
+
+#%%
+# Code Block 7
+# Set refference time
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+total_time = 0 
+U_Ticker = 0
+Plot_Ticker = 0
+EdgeTicker = 0
+Export_DEM_Ticker = 0
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 8
+# Time parameters
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+dt = 100            # time step [yr]
+tmax = 10E4        # time for the model loop to run [yr]
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+t = np.arange(0, tmax, dt)  # each of the time steps that the code will run
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 9
+# Plotting options
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+Plot_interval = 100
+Export_DEM_Interval = 5000
+min_drainage_area = 500
+
+DEM_Image = True
+Ksn = True
+Chi_Plot = True
+Chi_Map = True
+Hillshade = True
+Hillshaded_DEM = True
+Terrain_3D = False
+Export_DEM = True
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 10
+# Intializing all of the process components that do the work.
+
+frr = FlowRouter(mg)                                                                        # intializing flow routing
+#spr = StreamPowerEroder(mg, K_sp=Kspg, m_sp=m_sp, n_sp=n_sp, threshold_sp=0,                # initializing stream power incision
+#                        use_Q=None)                                                    
+spr = StreamPowerEroder(mg, K_sp='K_sp', m_sp=m_sp, n_sp=n_sp, threshold_sp=0,                # initializing stream power incision
+                        use_Q=None)       
+dfn = LinearDiffuser(mg, linear_diffusivity='K_hs', deposit = False)                          # initializing linear diffusion  
+tnld = TaylorNonLinearDiffuser(mg, linear_diffusivity='K_hs', slope_crit='S_cr', nterms=2)
+#pnld = PerronNLDiffuse(mg, nonlinear_diffusivity='K_hs', S_crit='S_cr', rock_density=2700.0, sed_density=2700.0)
+#df = DepressionFinderAndRouter(mg)                                                         # Initializing the pit finder
+
+theta = m_sp/n_sp 
+sf = SteepnessFinder(mg, reference_concavity=theta, min_drainage_area=min_drainage_area)                # initialize the component that will calculate channel steepness
+cf = ChiFinder(mg, min_drainage_area=min_drainage_area, reference_concavity=theta, use_true_dx=True)    # initialize the component that will calculate the chi index
+
+
+
+
+
+
+
+
+
+
+#%%
+# Code Block 11
+# Time loop
+
+for ti in t:
+                                                                                        
+    ##Add-on: EdgeTicker1################################################################  
+    if Diff_NS_Stream_Inciser == True:    
+        EdgeTicker = EdgeTicker + 1
+        if EdgeTicker == MultipleSlower:
+            mg.set_status_at_node_on_edges(right=4, top=1, left=1, bottom=1)
+            print(total_time, 'EdgeTicker =', EdgeTicker, 'Closed')
+    ##Add-on: EdgeTicker1################################################################
+        
+        
+        
+    
+
+    ##Add-on: PERIODIC UPLIFT PULSER##################################################### 
+    if Periodic_Uplift_Pulser == True:
+        if U_Ticker < Period:
+            U_Ticker = U_Ticker + dt
+        if U_Ticker >= Period:
+            U_Ticker = 0
+        if U_Ticker < Period-U2_duration:
+            uplift_rate = np.ones(mg.number_of_nodes)*U
+        if U_Ticker > Period-U2_duration:
+            uplift_rate = np.ones(mg.number_of_nodes)*U2
+    ##Add-on: PERIODIC UPLIFT PULSER#####################################################
+    
+
+
+
+
+    ##EROSION AND UPLIFT#################################################################
+    zr[mg.core_nodes] += uplift_rate[mg.core_nodes]*dt  # uplift the landscape
+    dfn.run_one_step(dt)                                # diffuse the landscape
+    #tnld.run_one_step(dt, dynamic_dt=True)                                # diffuse the landscape
+    #pnld.run_one_step(dt)                                # diffuse the landscape
+    #tnld.soilflux(dt, if_unstable='warn', dynamic_dt=True) # diffuse
+    frr.run_one_step()                                  # route flow
+    spr.run_one_step(dt)                                # fluvial incision
+    dz_ad = np.zeros(mg.size('node'))
+    dz_ad[mg.core_nodes] = uplift_rate[mg.core_nodes]*dt
+    #zr[mg.core_nodes] += dz_ad[mg.core_nodes]
+    lith.run_one_step(dz_advection = dz_ad, rock_id=2)
+    #lith.run_one_step(dz_advection = dz_ad)
+    ##EROSION AND UPLIFT#################################################################
+    
+
+
+
+
+    ##TIME###############################################################################
+    total_time += dt                                    # update time keeper
+    print(total_time)
+    Plot_Ticker += dt
+    Export_DEM_Ticker += dt
+    ##TIME###############################################################################
+    
+
+
+
+
+    ##Add-on: EdgeTicker2################################################################
+    if Diff_NS_Stream_Inciser == True:
+        if EdgeTicker == MultipleSlower:
+            mg.set_status_at_node_on_edges(right=4, top=4, left=1, bottom=1)
+            print(total_time, 'EdgeTicker =', EdgeTicker, 'Open')
+            EdgeTicker = 0
+    ##Add-on: EdgeTicker2################################################################
+    
+
+
+
+
+    ##FIGURE LOOP########################################################################
+    if Plot_Ticker == Plot_interval:
+    
+
+
+
+
+    ##Figure 1###########################################################################
+        if DEM_Image == True:
+            plt.ioff()
+            fig = plt.figure(1)         # plot in console as individual figure
+            imshow_grid(mg, 'topographic__elevation', grid_units=('m', 'm'), cmap='terrain', allow_colorbar=True)   #var_name='Elevation (m)')
+            title_text = '$Year$='+str(total_time)  #+ '; $U$='+str(U) + '; $Block Uplift$='+str(BU)
+            plt.title(title_text)
+            plt.tight_layout()
+            fig.savefig('/Users/Chris/Documents/Saves/DEM_Image/'+str(total_time)+'.png',  format='png', dpi=300)
+            plt.close(fig)
+    ##Figure 1###########################################################################
+    
+
+
+
+
+    ##Figure 2###########################################################################
+        if Ksn == True:  
+            plt.ioff()
+            profile_IDs = prf.channel_nodes(mg, mg.at_node['topographic__steepest_slope'],  # find the location of the largest channels, set initially to find 3 chans
+                                            mg.at_node['drainage_area'],
+                                            mg.at_node['flow__receiver_node'],
+                                            number_of_channels=5)
+            dists_upstr = prf.get_distances_upstream(                                       # find the upstream distances in these channels
+                    mg, len(mg.at_node['topographic__steepest_slope']),
+                    profile_IDs, mg.at_node['flow__link_to_receiver_node'])
+            fig = plt.figure(2)
+            plt.loglog(mg.at_node['drainage_area'][profile_IDs[0]],
+                    mg.at_node['topographic__steepest_slope'][profile_IDs[0]], 'r.',
+                    label='channel 1')
+            plt.loglog(mg.at_node['drainage_area'][profile_IDs[1]],
+                    mg.at_node['topographic__steepest_slope'][profile_IDs[1]], 'y.',
+                    label='channel 2')
+            plt.loglog(mg.at_node['drainage_area'][profile_IDs[2]],
+                    mg.at_node['topographic__steepest_slope'][profile_IDs[2]], 'g.',
+                    label='channel 3')
+            plt.loglog(mg.at_node['drainage_area'][profile_IDs[3]],
+                    mg.at_node['topographic__steepest_slope'][profile_IDs[3]], 'b.',
+                    label='channel 1')
+            plt.loglog(mg.at_node['drainage_area'][profile_IDs[4]],
+                    mg.at_node['topographic__steepest_slope'][profile_IDs[4]], 'm.',
+                    label='channel 1')
+            plt.xlabel('drainage area (m^2)')
+            plt.ylabel('channel slope [m/m]')
+            title_text = '$Year$='+str(total_time) 
+            plt.title(title_text)
+            plt.tight_layout()
+            fig.savefig('/Users/Chris/Documents/Saves/Ksn/'+str(total_time)+'.png', format='png', dpi=300)
+            plt.close(fig)
+    ##Figure 2###########################################################################
+    
+
+
+
+
+    ##Figure 3###########################################################################
+        if Chi_Plot == True:
+            plt.ioff()
+            cf.calculate_chi()          # calculate the chi index
+            fig = plt.figure(3)
+            plt.plot(mg.at_node['channel__chi_index'][profile_IDs[0]], 
+                    mg.at_node['topographic__elevation'][profile_IDs[0]],'r.',
+                    label='channel 1')
+            plt.plot(mg.at_node['channel__chi_index'][profile_IDs[1]], 
+                    mg.at_node['topographic__elevation'][profile_IDs[1]],'y.',
+                    label='channel 2')
+            plt.plot(mg.at_node['channel__chi_index'][profile_IDs[2]], 
+                    mg.at_node['topographic__elevation'][profile_IDs[2]],'g.',
+                    label='channel 3')
+            plt.plot(mg.at_node['channel__chi_index'][profile_IDs[3]], 
+                    mg.at_node['topographic__elevation'][profile_IDs[3]],'b.',
+                    label='channel 1')
+            plt.plot(mg.at_node['channel__chi_index'][profile_IDs[4]], 
+                    mg.at_node['topographic__elevation'][profile_IDs[4]],'m.',
+                    label='channel 1')
+            #cf.calculate_chi()          # calculate the chi index
+            plt.xlabel('chi index (m)')
+            plt.ylabel('elevation (m)')
+            title_text = '$Year$='+str(total_time)
+            plt.title(title_text)
+            plt.tight_layout()
+            fig.savefig('/Users/Chris/Documents/Saves/Chi_Plot/'+str(total_time)+'.png', format='png', dpi=300)
+            plt.close(fig)
+    ##Figure 3###########################################################################
+    
+
+
+
+
+    ##Figure 4###########################################################################
+        if Chi_Map == True:
+            plt.ioff()
+            fig = plt.figure(4)
+            imshow_grid(mg, 'channel__chi_index', grid_units=('m', 'm'),
+                            var_name='Chi index (m)', cmap='jet')
+            title_text = '$Year$='+str(total_time)
+            plt.title(title_text)
+            plt.tight_layout()
+            fig.savefig('/Users/Chris/Documents/Saves/Chi_Map/'+str(total_time)+'.png', format='png', dpi=300)
+            plt.close(fig)
+    ##Figure 4###########################################################################
+    
+
+
+
+
+    ##Figure 6###########################################################################
+        if Hillshade == True:
+            plt.ioff()
+            fig = plt.figure(6)
+            #slp, cmp = mg.calc_slope_at_node(zr, return_components=True)
+            #asp = mg.calc_aspect_at_node(cmp)
+            #hs = mg.calc_hillshade_at_node(45,40,slp,asp)
+            hs = mg.calc_hillshade_at_node(elevs=zr, alt=45, az=135)
+            imshow_grid(mg, hs, grid_units=('m', 'm') , cmap='Greys', allow_colorbar=False)
+            title_text = '$Year$='+str(total_time) #+ '; $U$='+str(U) + '; $Block Uplift$='+str(BU)
+            plt.title(title_text)
+            plt.tight_layout()
+            fig.savefig('/Users/Chris/Documents/Saves/Hillshade/'+str(total_time)+'.png', format='png', dpi=300)
+            plt.close(fig)
+    ##Figure 6###########################################################################
+    
+
+
+
+
+    ##Figure 7###########################################################################
+        if Hillshaded_DEM == True:
+            plt.ioff()
+            fig = plt.figure(7) # plot in console as individual figure
+            imshow_grid(mg, 'topographic__elevation', grid_units=('m', 'm'), cmap='terrain', allow_colorbar=False) #var_name='Elevation (m)')
+            title_text = '$Year$='+str(total_time) #+ '; $U$='+str(U) + '; $Block Uplift$='+str(BU)
+            plt.title(title_text)
+            plt.tight_layout()
+            fig.savefig('/Users/Chris/Documents/Saves/Hillshaded_DEM/'+str(total_time)+'.png', format='png', dpi=300)
+            plt.close(fig)
+            bg = Image.open('/Users/Chris/Documents/Saves/Hillshade/'+str(total_time)+'.png')
+            fg = Image.open('/Users/Chris/Documents/Saves/Hillshaded_DEM/'+str(total_time)+'.png')
+            Image.blend(bg, fg, .7).save('/Users/Chris/Documents/Saves/Hillshaded_DEM/'+str(total_time)+'.png', format='png')    ## set alpha to .7
+    ##Figure 8###########################################################################
+    
+
+
+
+
+
+    ##Figure 9###########################################################################
+        if Terrain_3D == True:
+            plt.ioff()
+            def surf_plot(mg, surface='topographic__elevation', title='Surface plot of topography'):
+    
+                #fig = plt.figure(9)
+                ax = fig.gca(projection='3d')
+
+                # Plot the surface.
+                Z = mg.at_node[surface].reshape(mg.shape)
+                #color = cm.terrain((Z-Z.min())/(Z.max()-Z.min()))
+                color = cm.terrain((Z-Z.min())/(0.2-Z.min()))
+                surf = ax.plot_surface(mg.node_x.reshape(mg.shape), mg.node_y.reshape(mg.shape), 
+                                        Z,
+                                        rstride=1, cstride=1,
+                                        facecolors=color,
+                                        edgecolor='none',
+                                        linewidth=0., 
+                                        antialiased=False)
+                ax.view_init(elev=55, azim=-120)
+                #ax.set_xlabel('X axis')
+                #ax.set_ylabel('Y axis')
+                #ax.set_zlabel('Elevation')
+                #plt.title(title)
+                #plt.show()
+                ax.set_zlim(0, 0.2)
+
+
+            fig = plt.figure(9)
+            sp3D = surf_plot(mg, title='Topography')
+            fig.savefig('/Users/Chris/Documents/Saves/Terrain_3D/'+str(total_time)+'.png', format='png', dpi=300)
+            plt.close(fig)
+    ##Figure 9###########################################################################
+    
+    
+   
+
+        Plot_Ticker = 0
+    ##FIGURE LOOP#########################################################################
+               
+               
+               
+               
+               
+    ##Export DEM#########################################################################
+    if Export_DEM == True:
+        if Export_DEM_Ticker == Export_DEM_Interval:
+            with cdtemp() as _:
+                files = write_esri_ascii('/Users/Chris/Documents/Saves/Export_DEM/'+str(total_time)+'.asc', mg, names='topographic__elevation')
+            Export_DEM_Ticker = 0
+##Export DEM#########################################################################           
+
+
+
+
+#%%
